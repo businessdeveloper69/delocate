@@ -1,0 +1,78 @@
+name: Verify delocate-merge with zope.interface 8.6
+on:
+  push:
+    branches: [verify/zope-8-6-lipo]
+permissions:
+  contents: read
+jobs:
+  merge:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [xcode-27, macos-26, macos-26-intel]
+    name: Merge and import (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 18
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          path: harness
+          persist-credentials: false
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: matthew-brett/delocate
+          ref: 9aeae5734ea038a0147c0f0d34b917db6fce2a53
+          path: upstream
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: glyph/delocate
+          ref: 39e34264a35774bd59114cdd9611744911bff896
+          path: candidate
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        continue-on-error: true
+        with:
+          python-version: '3.14'
+      - name: Merge both released wheels and check native imports
+        env:
+          RUNNER_LABEL: ${{ matrix.os }}
+        run: python3.14 harness/verification/verify.py "$RUNNER_LABEL"
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        if: always()
+        with:
+          name: receipt-${{ matrix.os }}
+          path: ${{ runner.temp }}/real-wheel-check/receipts/*.json
+          if-no-files-found: warn
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        if: always() && matrix.os == 'xcode-27'
+        with:
+          name: xcode-27-merged-wheel
+          path: ${{ runner.temp }}/real-wheel-check/cross-wheel/*.whl
+          if-no-files-found: warn
+  cross-import:
+    name: Import the Xcode 27 output on Intel
+    runs-on: macos-26-intel
+    needs: merge
+    if: always()
+    timeout-minutes: 7
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        continue-on-error: true
+        with:
+          python-version: '3.14'
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
+        with:
+          name: xcode-27-merged-wheel
+          path: ${{ runner.temp }}/cross-wheel
+      - name: Verify slices, RECORD and native Intel import
+        run: python3.14 verification/verify.py cross "$RUNNER_TEMP/cross-wheel"
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: cross-import-receipt
+          path: ${{ runner.temp }}/real-wheel-check/receipts/cross.json
