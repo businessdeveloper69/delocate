@@ -45,6 +45,8 @@ jobs:
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$PIN"
           echo '48b3b551eeaa0efe12a2a49f438476a8b375f1ea36958eea73b2905986d912ed  fixtures.tar.gz' | (cd "$RUNNER_TEMP/test-fixtures" && shasum -a 256 -c -)
+          mkdir "$RUNNER_TEMP/checked-in-fixture-wheels"
+          mv delocate/tests/data/fakepkg*.whl "$RUNNER_TEMP/checked-in-fixture-wheels/"
           tar -xzf "$RUNNER_TEMP/test-fixtures/fixtures.tar.gz" -C delocate/tests/data
           shasum -a 256 delocate/tests/test_fuse.py
           python -m venv "$RUNNER_TEMP/replay-env"
