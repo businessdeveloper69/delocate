@@ -1,0 +1,86 @@
+name: Verify existing delocate fusion tests on Xcode 27
+on:
+  push:
+    branches: [verify/zope-8-6-existing-tests]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  test:
+    name: Existing tests (${{ matrix.revision }})
+    runs-on: xcode-27
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - revision: base
+            repository: matthew-brett/delocate
+            sha: 9aeae5734ea038a0147c0f0d34b917db6fce2a53
+          - revision: candidate
+            repository: glyph/delocate
+            sha: 39e34264a35774bd59114cdd9611744911bff896
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: ${{ matrix.repository }}
+          ref: ${{ matrix.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.14'
+      - name: Fetch the upstream Intel-built wheel and library fixtures
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
+        with:
+          github-token: ${{ github.token }}
+          run-id: '44928686428'
+          artifact-ids: '14716579203'
+          merge-multiple: true
+          path: ${{ runner.temp }}/test-fixtures
+      - name: Build and install the exact revision with the original fixture data
+        env:
+          PIN: ${{ matrix.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$PIN"
+          echo '48b3b551eeaa0efe12a2a49f438476a8b375f1ea36958eea73b2905986d912ed  fixtures.tar.gz' | (cd "$RUNNER_TEMP/test-fixtures" && shasum -a 256 -c -)
+          tar -xzf "$RUNNER_TEMP/test-fixtures/fixtures.tar.gz" -C delocate/tests/data
+          shasum -a 256 delocate/tests/test_fuse.py
+          python -m venv "$RUNNER_TEMP/replay-env"
+          "$RUNNER_TEMP/replay-env/bin/python" -m pip install . -r test-requirements.txt
+      - name: Run the installed project's two existing fusion tests
+        env:
+          REVISION: ${{ matrix.revision }}
+          DEVELOPER_DIR: /Applications/Xcode_27.1.app/Contents/Developer
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/receipts"
+          cd "$RUNNER_TEMP/receipts"
+          xcodebuild -version
+          xcrun --find lipo
+          python="$RUNNER_TEMP/replay-env/bin/python"
+          "$python" -c 'from delocate.tests import test_fuse; print(test_fuse.__file__)'
+          set +e
+          "$python" -m pytest --pyargs delocate.tests.test_fuse -v --doctest-modules --junitxml=pytest.xml >pytest.log 2>&1
+          ret=$?
+          set -e
+          cat pytest.log
+          "$python" - "$ret" <<'PY'
+          import json,os,sys,xml.etree.ElementTree as ET
+          from pathlib import Path
+          cases={c.get('name'): (c.find('failure').text if c.find('failure') is not None else None) for c in ET.parse('pytest.xml').iter('testcase')}
+          summary={n:('passed' if f is None else f.splitlines()[-1]) for n,f in cases.items()}
+          print('EXPECTED TEST OUTCOMES',json.dumps(summary),flush=True)
+          Path('summary.json').write_text(json.dumps({'revision':os.environ['REVISION'],'pytest_exit':int(sys.argv[1]),'cases':summary},indent=2))
+          assert set(cases)=={'test_fuse_trees','test_fuse_wheels'}, cases.keys()
+          if os.environ['REVISION']=='base':
+              assert int(sys.argv[1])==1 and 'no eligible inputs found' in (cases['test_fuse_wheels'] or ''), summary
+          else:
+              assert int(sys.argv[1])==0 and not any(cases.values()), summary
+          PY
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        if: always()
+        with:
+          name: pytest-${{ matrix.revision }}
+          path: ${{ runner.temp }}/receipts
