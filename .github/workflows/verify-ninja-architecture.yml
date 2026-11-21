@@ -37,13 +37,14 @@ jobs:
           python - <<'PY'
           from pathlib import Path
           from zipfile import ZipFile
-          from subprocess import check_call
+          from subprocess import check_output
           data=Path("delocate/tests/data")
           wheels=sorted(data.glob("fakepkg*.whl"))
           assert len(wheels) == 5, wheels
           with ZipFile(next(data.glob("fakepkg2-*.whl"))) as z:
               assert z.read("fakepkg2/__init__.py").startswith(b'"""Fake package.')
-          check_call(["lipo","-verify_arch","arm64","x86_64",str(data/"liba_both.dylib")])
+          archs=check_output(["lipo","-archs",str(data/"liba_both.dylib")],text=True).split()
+          assert set(archs)=={"arm64","x86_64"}, archs
           PY
           tar -czf "$RUNNER_TEMP/fixtures.tar.gz" -C delocate/tests/data .
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
