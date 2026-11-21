@@ -1,0 +1,151 @@
+name: Verify delocate architecture checks
+on:
+  workflow_dispatch:
+    inputs:
+      patch:
+        description: Gzip and Base64 encoded candidate diff
+        required: true
+        type: string
+      tree:
+        description: Expected candidate tree on the pinned upstream commit
+        required: true
+        type: string
+      replay:
+        description: Gzip and Base64 encoded JSON containing replay script and wheel manifest
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  fixtures:
+    runs-on: macos-15-intel
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: matthew-brett/delocate
+          ref: 9aeae5734ea038a0147c0f0d34b917db6fce2a53
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+      - name: Build project fixtures on Intel
+        run: |
+          set -euo pipefail
+          python -m pip install setuptools wheel
+          make
+          python - <<'PY'
+          from pathlib import Path
+          from zipfile import ZipFile
+          from subprocess import check_call
+          data=Path("delocate/tests/data")
+          wheels=sorted(data.glob("fakepkg*.whl"))
+          assert len(wheels) == 5, wheels
+          with ZipFile(next(data.glob("fakepkg2-*.whl"))) as z:
+              assert z.read("fakepkg2/__init__.py").startswith(b'"""Fake package.')
+          check_call(["lipo","-verify_arch","arm64","x86_64",str(data/"liba_both.dylib")])
+          PY
+          tar -czf "$RUNNER_TEMP/fixtures.tar.gz" -C delocate/tests/data .
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: delocate-132-fixtures
+          path: ${{ runner.temp }}/fixtures.tar.gz
+          compression-level: 0
+  verify:
+    needs: fixtures
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-15-intel]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: matthew-brett/delocate
+          ref: 9aeae5734ea038a0147c0f0d34b917db6fce2a53
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: delocate-132-fixtures
+          path: ${{ runner.temp }}
+      - name: Use the same generated fixtures on each architecture
+        run: |
+          set -eu
+          rm -f delocate/tests/data/fakepkg*.whl
+          tar -xzf "$RUNNER_TEMP/fixtures.tar.gz" -C delocate/tests/data
+      - name: Prepare inputs
+        env:
+          PATCH_DATA: ${{ inputs.patch }}
+          REPLAY_DATA: ${{ inputs.replay }}
+          EXPECT_TREE: ${{ inputs.tree }}
+        run: |
+          set -eu
+          mkdir -p "$RUNNER_TEMP/receipts"
+          python - <<'PY'
+          from pathlib import Path
+          import base64, gzip, json, os, re
+          p=Path(os.environ["RUNNER_TEMP"])
+          patch=gzip.decompress(base64.b64decode(os.environ["PATCH_DATA"],validate=True))
+          (p/"candidate.patch").write_bytes(patch)
+          replay=json.loads(gzip.decompress(base64.b64decode(os.environ["REPLAY_DATA"],validate=True)))
+          for name in ("replay.py","ninja-wheels.json"):
+              (p/name).write_text(replay[name])
+          assert re.fullmatch(r"[0-9a-f]{40}",os.environ["EXPECT_TREE"])
+          PY
+          git apply --check "$RUNNER_TEMP/candidate.patch"
+          git --version
+          uname -a
+          xcodebuild -version
+          xcrun --find otool
+          xcrun --find lipo
+          which python
+      - name: Released delocate downstream replay
+        run: |
+          set -eu
+          python -m venv "$RUNNER_TEMP/released"
+          source "$RUNNER_TEMP/released/bin/activate"
+          python -m pip install delocate==0.13.0
+          python "$RUNNER_TEMP/replay.py" release "$RUNNER_TEMP/receipts"
+      - name: Test current upstream
+        run: |
+          set -euo pipefail
+          python -m pip install -e . -r test-requirements.txt
+          python "$RUNNER_TEMP/replay.py" base "$RUNNER_TEMP/receipts"
+          python -m pytest --junitxml="$RUNNER_TEMP/receipts/base-suite.xml" | tee "$RUNNER_TEMP/receipts/base-suite.log"
+      - name: Prove the regression
+        run: |
+          set -eu
+          git apply --index --include='delocate/tests/*' "$RUNNER_TEMP/candidate.patch"
+          set +e
+          python -m pytest -q --no-cov delocate/tests/test_wheelies.py::test_require_archs_checks_bundled_binaries >"$RUNNER_TEMP/receipts/regression-before.log" 2>&1
+          rc=$?
+          set -e
+          cat "$RUNNER_TEMP/receipts/regression-before.log"
+          test "$rc" = 1
+          grep -q 'DID NOT RAISE' "$RUNNER_TEMP/receipts/regression-before.log"
+      - name: Verify candidate tree and run complete suite
+        env:
+          EXPECT_TREE: ${{ inputs.tree }}
+        run: |
+          set -euo pipefail
+          git apply --index --exclude='delocate/tests/*' "$RUNNER_TEMP/candidate.patch"
+          git write-tree | tee "$RUNNER_TEMP/receipts/candidate-tree.txt"
+          test "$(git write-tree)" = "$EXPECT_TREE"
+          git diff --cached --check
+          python -m pytest --junitxml="$RUNNER_TEMP/receipts/candidate-suite.xml" | tee "$RUNNER_TEMP/receipts/candidate-suite.log"
+          python "$RUNNER_TEMP/replay.py" candidate "$RUNNER_TEMP/receipts"
+      - name: Upload verification receipts
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: delocate-132-${{ matrix.os }}
+          path: |
+            ${{ runner.temp }}/receipts/*.json
+            ${{ runner.temp }}/receipts/*.xml
+            ${{ runner.temp }}/receipts/*.log
+            ${{ runner.temp }}/receipts/*.txt
+            ${{ runner.temp }}/receipts/*/*/log.txt
