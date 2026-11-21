@@ -14,6 +14,8 @@ on:
         description: Gzip and Base64 encoded JSON containing replay script and wheel manifest
         required: true
         type: string
+env:
+  DEVELOPER_DIR: /Applications/Xcode_16.0.app/Contents/Developer
 permissions:
   contents: read
 jobs:
@@ -26,12 +28,20 @@ jobs:
           repository: matthew-brett/delocate
           ref: 9aeae5734ea038a0147c0f0d34b917db6fce2a53
           persist-credentials: false
+          submodules: true
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
       - name: Build project fixtures on Intel
+        env:
+          MB_PYTHON_OSX_VER: "11"
+          SOURCE_DATE_EPOCH: "0"
+          PYTHONHASHSEED: "0"
         run: |
-          set -euo pipefail
+          set -eo pipefail
+          xcodebuild -version
+          source multibuild/osx_utils.sh
+          get_macpython_environment 3.10 venv
           python -m pip install setuptools wheel
           make
           python - <<'PY'
